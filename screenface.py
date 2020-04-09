@@ -1,20 +1,34 @@
 import numpy as np 
 import cv2
-from PIL import ImageGrab
-from keras.utils.data_utils import get_file
+import os
 import dlib
+from PIL import ImageGrab
 from contextlib import contextmanager
 from pathlib import Path
+from statistics import mode
 from wide_resnet import WideResNet
+from keras.models import load_model
+from utils.datasets import get_labels
+from utils.inference import detect_faces
+from utils.inference import draw_text
+from utils.inference import apply_offsets
+from utils.inference import load_detection_model
+from utils.preprocessor import preprocess_input
 
-agegenderdetectmodel = "https://github.com/yu4u/age-gender-estimation/releases/download/v0.5/weights.28-3.73.hdf5"
-modhash = 'fbe63257a054c1c5466cfd7bf14646d6'
 depth = 16
 k = 8
 margin = 0.4
-weight_file = get_file("weights.28-3.73.hdf5", agegenderdetectmodel, cache_subdir="pretrained_models", file_hash=modhash, cache_dir="F:\screenface\pretrained_model")
+weight_file = "F:\screenface\pretrained_model\weights.28-3.73.hdf5"
+emotion_file = "F:\screenface\pretrained_model\emotion_model.hdf5"
+face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 model = WideResNet(64, depth = depth, k=k)()
 model.load_weights(weight_file)
+emotion_labels = get_labels('fer2013')
+emotion_class = load_model(emotion_file)
+emotion_target_size = emotion_class.input_shape[1:3]
+emotion_window = []
+frame_window = 10
+emotion_offsets = (20, 40)
 
 detektoragen = dlib.get_frontal_face_detector()
 
@@ -30,10 +44,14 @@ while True:
     img_np = np.array(img)
     k = cv2.waitKey(1)
     frame = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
+    grayframe = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
     img_h, img_w, _ = np.shape(frame)
 
     agendetected = detektoragen(frame, 1)
+
     faceagen = np.empty((len(agendetected), 64, 64, 3))
+
+    faces = face_cascade.detectMultiScale(grayframe, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30), flags=cv2.CASCADE_SCALE_IMAGE)
         
     if len(agendetected) > 0:
         for i, d in enumerate(agendetected):
@@ -43,6 +61,42 @@ while True:
             xw2 = min(int(x2 + margin * w), img_w - 1)
             yw2 = min(int(y2 + margin * h), img_h - 1)
             faceagen[i, :, :, :] = cv2.resize(img_np[yw1:yw2 + 1, xw1:xw2 + 1, :], (64, 64))
+        
+        for d in faces:
+            ex1, ex2, ey1, ey2 = apply_offsets(d, emotion_offsets)
+            gray_face = grayframe[ey1:ey2, ex1:ex2]
+            try:
+                gray_face = cv2.resize(gray_face, (emotion_target_size))
+            except:
+                continue
+            gray_face = preprocess_input(gray_face, True)
+            gray_face = np.expand_dims(gray_face, 0)
+            gray_face = np.expand_dims(gray_face, -1)
+            emotion_preds = emotion_class.predict(gray_face)
+            emotion_prob = np.max(emotion_preds)
+            emotion_label_arg = np.argmax(emotion_preds)
+            emotion_text = emotion_labels[emotion_label_arg]
+            emotion_window.append(emotion_text)
+            if len(emotion_window) > frame_window:
+                emotion_window.pop(0)
+            try:
+                emotion_mode = mode(emotion_window)
+            except:
+                continue
+
+            if emotion_text == 'angry':
+                color = emotion_prob*np.asarray((255, 0, 0))
+            elif emotion_text == 'sad':
+                color = emotion_prob*np.asarray((0, 0, 255))
+            elif emotion_text == 'happy':
+                color = emotion_prob*np.asarray((255, 255, 0))
+            elif emotion_text == 'surprise':
+                color = emotion_prob*np.asarray((0, 255, 255))
+            else:
+                color = emotion_prob*np.asarray((0, 255, 0))
+            color = color.astype(int)
+            color = color.tolist()
+            draw_text(d, frame, emotion_mode, color, 0, 80, 1, 1)
 
         results = model.predict(faceagen)
 
